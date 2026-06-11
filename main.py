@@ -1,24 +1,139 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
-from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
+import os
+import aiohttp
+import tempfile
+import math
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
+from PIL import Image
+from PIL import ImageSequence
+
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context, Star, register
+
+
+@register("gifhelper", "QuanWenG", "GIF倍速插件", "1.0.0")
 class MyPlugin(Star):
+
     def __init__(self, context: Context):
         super().__init__(context)
 
-    async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+    @filter.command("倍速")
+    async def gifSpeed(self, event: AstrMessageEvent):
 
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+        parts = event.get_message_str().split()
 
-    async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
+        if len(parts) < 2:
+            yield event.plain_result(
+                "用法：回复GIF后发送\n/倍速 2"
+            )
+            return
+
+        try:
+            speed = float(parts[1])
+
+            if speed <= 0:
+                raise ValueError()
+
+        except ValueError:
+            yield event.plain_result("倍速必须大于0")
+            return
+
+        reply = None
+
+        for seg in event.get_messages():
+            if seg.__class__.__name__ == "Reply":
+                reply = seg
+                break
+
+        if not reply:
+            yield event.plain_result("请回复GIF使用")
+            return
+
+        image = None
+
+        for item in reply.chain:
+            if item.__class__.__name__ == "Image":
+                image = item
+                break
+
+        if not image:
+            yield event.plain_result("引用消息中没有图片")
+            return
+
+        url = image.url
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+
+            input_path = os.path.join(tmpdir, "input.gif")
+            output_path = os.path.join(tmpdir, "output.gif")
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+
+                    if resp.status != 200:
+                        yield event.plain_result("下载GIF失败")
+                        return
+
+                    with open(input_path, "wb") as f:
+                        f.write(await resp.read())
+
+            try:
+
+                gif = Image.open(input_path)
+
+                raw_frames = []
+                raw_durations = []
+
+                for frame in ImageSequence.Iterator(gif):
+
+                    raw_frames.append(
+                        frame.copy().convert("RGBA")
+                    )
+
+                    raw_durations.append(
+                        frame.info.get("duration", 100)
+                    )
+
+                if not raw_frames:
+                    raise Exception("GIF没有帧")
+
+                frames = []
+                durations = []
+
+                for frame, duration in zip(raw_frames, raw_durations):
+
+                    frames.append(frame)
+
+                    durations.append(
+                        max(
+                            10,
+                            int(duration / speed)
+                        )
+                    )
+
+                # 如果所有帧都触底10ms
+                # 再删帧
+                if speed > 1 and all(d <= 10 for d in durations):
+
+                    skip = math.ceil(speed)
+
+                    frames = frames[::skip]
+                    durations = durations[::skip]
+
+                frames[0].save(
+                    output_path,
+                    save_all=True,
+                    append_images=frames[1:],
+                    duration=durations,
+                    loop=0,
+                    disposal=2,
+                    optimize=False,
+                )
+
+            except Exception as e:
+
+                yield event.plain_result(
+                    f"GIF处理失败：{e}"
+                )
+                return
+
+            yield event.image_result(output_path)
